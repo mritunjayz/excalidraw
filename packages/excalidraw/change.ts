@@ -265,7 +265,6 @@ export class AppStateChange implements Change<AppState> {
     return new AppStateChange(inversedDelta);
   }
 
-  // TODO_UNDO: filter out appState related to deleted elements
   public applyTo(
     appState: Readonly<AppState>,
     elements: ReadonlyMap<string, ExcalidrawElement>,
@@ -300,7 +299,8 @@ export class AppStateChange implements Change<AppState> {
       selectedGroupIds: mergedSelectedGroupIds,
     };
 
-    const constainsVisibleChanges = this.checkForVisibleChanges(
+    // Mutates `nextAppState` be removing state related to deleted elements
+    const constainsVisibleChanges = this.filterInvisibleChanges(
       appState,
       nextAppState,
       elements,
@@ -366,11 +366,12 @@ export class AppStateChange implements Change<AppState> {
     return [from, to];
   }
 
-  private checkForVisibleChanges(
+  private filterInvisibleChanges(
     prevAppState: AppState,
     nextAppState: ObservedAppState,
     nextElements: ReadonlyMap<string, ExcalidrawElement>,
   ): boolean {
+    const visibleDifferenceFlag = { value: false };
     const containsStandaloneDifference = Delta.isRightDifferent(
       prevAppState,
       AppStateChange.stripElementsProps(nextAppState),
@@ -378,7 +379,7 @@ export class AppStateChange implements Change<AppState> {
 
     if (containsStandaloneDifference) {
       // We detected a a difference which is unrelated to the elements
-      return true;
+      visibleDifferenceFlag.value = true;
     }
 
     const containsElementsDifference = Delta.isRightDifferent(
@@ -388,7 +389,7 @@ export class AppStateChange implements Change<AppState> {
 
     if (!containsStandaloneDifference && !containsElementsDifference) {
       // There is no difference detected at all
-      return false;
+      visibleDifferenceFlag.value = false;
     }
 
     // We need to handle elements differences separately,
@@ -402,29 +403,31 @@ export class AppStateChange implements Change<AppState> {
     for (const key of changedDeltaKeys) {
       switch (key) {
         case "selectedElementIds":
-          if (
-            AppStateChange.checkForSelectedElementsDifferences(
-              nextAppState,
+          nextAppState.selectedElementIds =
+            AppStateChange.filterSelectedElements(
+              nextAppState[key],
               nextElements,
-            )
-          ) {
-            return true;
-          }
+              visibleDifferenceFlag,
+            );
           break;
         case "selectedLinearElement":
         case "editingLinearElement":
-          if (
-            AppStateChange.checkForLinearElementDifferences(
-              nextAppState[key],
-              nextElements,
-            )
-          ) {
-            return true;
-          }
+          nextAppState[key] = AppStateChange.filterLinearElement(
+            nextAppState[key],
+            nextElements,
+            visibleDifferenceFlag,
+          );
           break;
         case "editingGroupId":
         case "selectedGroupIds":
-          return AppStateChange.checkForGroupsDifferences();
+          // Currently we don't have an index of elements by groupIds, which means that
+          // the calculation for getting the visible elements based on the groupIds stored in delta
+          // is not worth performing - due to perf. and dev. complexity.
+          //
+          // Therefore we are accepting in these cases empty undos / redos, which should be pretty rare:
+          // - only when one of these (or both) are in delta and the are no non deleted elements containing these group ids
+          visibleDifferenceFlag.value = true;
+          break;
         default: {
           assertNever(
             key,
@@ -435,57 +438,57 @@ export class AppStateChange implements Change<AppState> {
       }
     }
 
-    return false;
+    return visibleDifferenceFlag.value;
   }
 
-  private static checkForSelectedElementsDifferences(
-    appState: Pick<ObservedElementsAppState, "selectedElementIds">,
+  private static filterSelectedElements(
+    selectedElementIds: Mutable<ObservedElementsAppState["selectedElementIds"]>,
     elements: ReadonlyMap<string, ExcalidrawElement>,
+    visibleDifferenceFlag: { value: boolean },
   ) {
-    // TODO_UNDO: it could have been visible before (and now it's not)
-    for (const id of Object.keys(appState.selectedElementIds)) {
+    for (const id of Object.keys(selectedElementIds)) {
       const element = elements.get(id);
 
       if (element && !element.isDeleted) {
-        // // TODO_UNDO: breaks multi selection
+        // TODO_UNDO: breaks multi selection
         // if (appState.selectedElementIds[id]) {
         //   // Element is already selected
         //   return;
         // }
 
         // Found related visible element!
-        return true;
+        visibleDifferenceFlag.value = true;
+      } else {
+        delete selectedElementIds[id];
       }
     }
+
+    return selectedElementIds;
   }
 
-  private static checkForLinearElementDifferences(
+  private static filterLinearElement(
     linearElement:
       | ObservedElementsAppState["editingLinearElement"]
-      | ObservedAppState["selectedLinearElement"]
-      | undefined,
+      | ObservedAppState["selectedLinearElement"],
     elements: ReadonlyMap<string, ExcalidrawElement>,
+    visibleDifferenceFlag: { value: boolean },
   ) {
     if (!linearElement) {
-      return;
+      return linearElement;
     }
+
+    let result: typeof linearElement | null = linearElement;
 
     const element = elements.get(linearElement.elementId);
 
     if (element && !element.isDeleted) {
       // Found related visible element!
-      return true;
+      visibleDifferenceFlag.value = true;
+    } else {
+      result = null;
     }
-  }
 
-  // Currently we don't have an index of elements by groupIds, which means
-  // the calculation for getting the visible elements based on the groupIds stored in delta
-  // is not worth performing - due to perf. and dev. complexity.
-  //
-  // Therefore we are accepting in these cases empty undos / redos, which should be pretty rare:
-  // - only when one of these (or both) are in delta and the are no non deleted elements containing these group ids
-  private static checkForGroupsDifferences() {
-    return true;
+    return result;
   }
 
   private static stripElementsProps(
